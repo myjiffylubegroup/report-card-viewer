@@ -42,10 +42,20 @@ const REPORT_TYPES = {
 
 // Qualification filter options
 const QUALIFICATION_FILTERS = {
-  all: { label: 'All Employees', description: 'Everyone with activity' },
-  qualified: { label: 'Qualified (15%+)', description: 'Meets bonus threshold' },
-  visible: { label: 'Near Threshold (10-15%)', description: 'Visible but not yet qualified' },
-  qualifiedOrVisible: { label: 'Qualified + Near', description: '10%+ threshold' }
+  all: { label: 'All Employees', description: 'Everyone with activity', minPct: 0 },
+  visible: { label: 'Visible (10%+)', description: 'On report card but may not qualify', minPct: 10 },
+  qualified: { label: 'Qualified (15%+)', description: 'Meets bonus threshold', minPct: 15 }
+}
+
+// Sort options
+const SORT_OPTIONS = {
+  name: { label: 'Name (A-Z)', fn: (a, b) => `${a.last_name} ${a.first_name}`.localeCompare(`${b.last_name} ${b.first_name}`) },
+  nameDesc: { label: 'Name (Z-A)', fn: (a, b) => `${b.last_name} ${b.first_name}`.localeCompare(`${a.last_name} ${a.first_name}`) },
+  store: { label: 'Store', fn: (a, b) => a.store_number - b.store_number },
+  invoices: { label: 'Invoices (High-Low)', fn: (a, b) => b.invoice_count - a.invoice_count },
+  invoicesAsc: { label: 'Invoices (Low-High)', fn: (a, b) => a.invoice_count - b.invoice_count },
+  percentage: { label: 'Percentage (High-Low)', fn: (a, b) => b.invoice_percentage - a.invoice_percentage },
+  percentageAsc: { label: 'Percentage (Low-High)', fn: (a, b) => a.invoice_percentage - b.invoice_percentage }
 }
 
 // Preset periods
@@ -92,6 +102,7 @@ export default function ReportViewer({ session }) {
   const [reportType, setReportType] = useState('csa')
   const [selectedStores, setSelectedStores] = useState([]) // Empty = all stores
   const [qualificationFilter, setQualificationFilter] = useState('all')
+  const [sortBy, setSortBy] = useState('name')
   const [viewMode, setViewMode] = useState('single') // 'single' or 'batch'
   
   // Employee states
@@ -123,15 +134,17 @@ export default function ReportViewer({ session }) {
   
   const periods = getPresetPeriods()
 
-  // Fetch employees when report type changes
+  // Fetch employees when report type or period changes
   useEffect(() => {
-    fetchEmployees()
-  }, [reportType])
+    if (selectedPeriod || (useCustomDates && customDates.start && customDates.end)) {
+      fetchEmployees()
+    }
+  }, [reportType, selectedPeriod, useCustomDates, customDates.start, customDates.end])
 
-  // Filter employees when filters change
+  // Filter and sort employees when filters change
   useEffect(() => {
-    applyFilters()
-  }, [allEmployees, selectedStores, qualificationFilter])
+    applyFiltersAndSort()
+  }, [allEmployees, selectedStores, qualificationFilter, sortBy])
 
   async function fetchEmployees() {
     setLoadingEmployees(true)
@@ -141,10 +154,19 @@ export default function ReportViewer({ session }) {
     setReportData(null)
     setBatchReports([])
     
+    const startDate = useCustomDates ? customDates.start : selectedPeriod?.start
+    const endDate = useCustomDates ? customDates.end : selectedPeriod?.end
+    
+    if (!startDate || !endDate) {
+      setLoadingEmployees(false)
+      return
+    }
+    
     try {
       const config = REPORT_TYPES[reportType]
       
       if (reportType === 'manager') {
+        // Manager handling - different logic
         const { data, error } = await supabase
           .from('employees')
           .select('user_id, first_name, last_name, store_number')
@@ -153,7 +175,6 @@ export default function ReportViewer({ session }) {
         
         if (error) throw error
         
-        // Filter to likely managers (this is approximate)
         const managers = data?.filter(e => {
           const name = `${e.first_name} ${e.last_name}`.toUpperCase()
           return name.includes('CANTRELL') || name.includes('SHUTT') || 
@@ -161,15 +182,14 @@ export default function ReportViewer({ session }) {
                  name.includes('MAY') || name.includes('MEAD')
         }) || []
         
-        setAllEmployees(managers)
+        // Add placeholder percentage for managers
+        setAllEmployees(managers.map(m => ({ ...m, invoice_count: 0, store_total_invoices: 0, invoice_percentage: 100 })))
       } else {
-        const thirtyDaysAgo = new Date()
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-        
         const { data, error } = await supabase
           .rpc('get_employees_by_role', { 
             p_role: config.role,
-            p_start_date: formatDate(thirtyDaysAgo)
+            p_start_date: startDate,
+            p_end_date: endDate
           })
         
         if (error) throw error
@@ -177,13 +197,13 @@ export default function ReportViewer({ session }) {
       }
     } catch (err) {
       console.error('Error fetching employees:', err)
-      setError('Failed to load employees')
+      setError('Failed to load employees: ' + err.message)
     } finally {
       setLoadingEmployees(false)
     }
   }
 
-  function applyFilters() {
+  function applyFiltersAndSort() {
     let filtered = [...allEmployees]
     
     // Filter by store
@@ -191,8 +211,15 @@ export default function ReportViewer({ session }) {
       filtered = filtered.filter(emp => selectedStores.includes(emp.store_number))
     }
     
-    // Note: Qualification filter will be applied after we fetch the actual report data
-    // For now, we show all employees and let the report generation handle qualification
+    // Filter by qualification percentage
+    const minPct = QUALIFICATION_FILTERS[qualificationFilter].minPct
+    if (minPct > 0) {
+      filtered = filtered.filter(emp => emp.invoice_percentage >= minPct)
+    }
+    
+    // Sort
+    const sortFn = SORT_OPTIONS[sortBy].fn
+    filtered.sort(sortFn)
     
     setFilteredEmployees(filtered)
   }
@@ -320,7 +347,7 @@ export default function ReportViewer({ session }) {
       : filteredEmployees
     
     if (employeesToProcess.length === 0) {
-      setError('No employees selected')
+      setError('No employees to process')
       return
     }
     
@@ -345,24 +372,11 @@ export default function ReportViewer({ session }) {
       
       try {
         const data = await generateReport(emp, false)
-        
-        // Apply qualification filter
-        let includeReport = true
-        if (qualificationFilter === 'qualified') {
-          includeReport = data.is_qualified === true
-        } else if (qualificationFilter === 'visible') {
-          includeReport = data.is_qualified === false && data.total_bonus !== undefined
-        } else if (qualificationFilter === 'qualifiedOrVisible') {
-          includeReport = data.total_bonus !== undefined
-        }
-        
-        if (includeReport) {
-          reports.push({
-            employee: emp,
-            data: data,
-            html: data.html || generateSummaryHtml(data)
-          })
-        }
+        reports.push({
+          employee: emp,
+          data: data,
+          html: data.html || generateSummaryHtml(data)
+        })
       } catch (err) {
         console.error(`Error generating report for ${emp.first_name} ${emp.last_name}:`, err)
         // Continue with next employee
@@ -374,7 +388,7 @@ export default function ReportViewer({ session }) {
     setBatchLoading(false)
     
     if (reports.length === 0) {
-      setError('No reports matched the selected filters')
+      setError('Failed to generate any reports')
     }
   }
 
@@ -406,8 +420,55 @@ export default function ReportViewer({ session }) {
     `
   }
 
+  // Calculate batch statistics
+  function getBatchStats() {
+    if (batchReports.length === 0) return null
+    
+    const qualified = batchReports.filter(r => r.data.is_qualified === true)
+    const nearThreshold = batchReports.filter(r => r.data.is_qualified === false)
+    const totalBonus = batchReports.reduce((sum, r) => sum + (r.data.total_bonus || 0), 0)
+    
+    return {
+      total: batchReports.length,
+      qualified: qualified.length,
+      nearThreshold: nearThreshold.length,
+      totalBonus: totalBonus
+    }
+  }
+
+  // Export to CSV
+  function exportToCsv() {
+    if (batchReports.length === 0) return
+    
+    const headers = ['Employee Name', 'Store', 'Store Name', 'Invoice %', 'Bonus Amount', 'Qualified']
+    const rows = batchReports.map(r => [
+      r.data.employee_name || `${r.employee.first_name} ${r.employee.last_name}`,
+      r.employee.store_number,
+      STORES[r.employee.store_number] || '',
+      r.employee.invoice_percentage?.toFixed(1) + '%',
+      '$' + (r.data.total_bonus || 0).toFixed(2),
+      r.data.is_qualified ? 'Yes' : 'No'
+    ])
+    
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+    ].join('\n')
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    const url = URL.createObjectURL(blob)
+    link.setAttribute('href', url)
+    link.setAttribute('download', `report-cards-${reportType}-${new Date().toISOString().split('T')[0]}.csv`)
+    link.style.visibility = 'hidden'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
   const config = REPORT_TYPES[reportType]
   const currentBatchReport = batchReports[currentBatchIndex]
+  const batchStats = getBatchStats()
 
   return (
     <div className="space-y-6">
@@ -415,7 +476,7 @@ export default function ReportViewer({ session }) {
       <div className="bg-white rounded-lg shadow p-6">
         <h2 className="text-2xl font-bold text-gray-800 mb-4">Generate Report Cards</h2>
         
-        {/* Row 1: Report Type and Store Filter */}
+        {/* Row 1: Report Type and Period */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
           {/* Report Type */}
           <div>
@@ -424,7 +485,11 @@ export default function ReportViewer({ session }) {
             </label>
             <select
               value={reportType}
-              onChange={(e) => setReportType(e.target.value)}
+              onChange={(e) => {
+                setReportType(e.target.value)
+                setAllEmployees([])
+                setFilteredEmployees([])
+              }}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-jl-red"
             >
               {Object.entries(REPORT_TYPES).map(([key, val]) => (
@@ -433,67 +498,10 @@ export default function ReportViewer({ session }) {
             </select>
           </div>
 
-          {/* Store Filter */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Store Filter
-              <span className="text-gray-400 font-normal ml-2">
-                ({selectedStores.length === 0 ? 'All Stores' : `${selectedStores.length} selected`})
-              </span>
-            </label>
-            <div className="flex flex-wrap gap-1">
-              <button
-                onClick={selectAllStores}
-                className={`px-2 py-1 text-xs rounded ${
-                  selectedStores.length === 0 
-                    ? 'bg-jl-red text-white' 
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                All
-              </button>
-              {STORE_LIST.map(store => (
-                <button
-                  key={store.number}
-                  onClick={() => toggleStoreSelection(store.number)}
-                  className={`px-2 py-1 text-xs rounded ${
-                    selectedStores.includes(store.number)
-                      ? 'bg-jl-red text-white'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                  }`}
-                >
-                  {store.number}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Row 2: Qualification Filter and Period */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          {/* Qualification Filter */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Qualification Filter
-            </label>
-            <select
-              value={qualificationFilter}
-              onChange={(e) => setQualificationFilter(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-jl-red"
-            >
-              {Object.entries(QUALIFICATION_FILTERS).map(([key, val]) => (
-                <option key={key} value={key}>{val.label}</option>
-              ))}
-            </select>
-            <p className="text-xs text-gray-500 mt-1">
-              {QUALIFICATION_FILTERS[qualificationFilter].description}
-            </p>
-          </div>
-
           {/* Period Selection */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Period
+              Period <span className="text-red-500">*</span>
             </label>
             <select
               value={useCustomDates ? 'custom' : (selectedPeriod?.label || '')}
@@ -512,7 +520,7 @@ export default function ReportViewer({ session }) {
               }}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-jl-red"
             >
-              <option value="">Select period</option>
+              <option value="">-- Select period first --</option>
               {periods.map((period) => (
                 <option key={period.label} value={period.label}>{period.label}</option>
               ))}
@@ -545,7 +553,115 @@ export default function ReportViewer({ session }) {
           </div>
         )}
 
-        {/* Row 3: View Mode Tabs */}
+        {/* Row 2: Store Filter */}
+        <div className="mb-4">
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Store Filter
+            <span className="text-gray-400 font-normal ml-2">
+              ({selectedStores.length === 0 ? 'All Stores' : `${selectedStores.length} selected`})
+            </span>
+          </label>
+          <div className="flex flex-wrap gap-1">
+            <button
+              onClick={selectAllStores}
+              className={`px-3 py-1.5 text-sm rounded ${
+                selectedStores.length === 0 
+                  ? 'bg-jl-red text-white' 
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              All
+            </button>
+            {STORE_LIST.map(store => (
+              <button
+                key={store.number}
+                onClick={() => toggleStoreSelection(store.number)}
+                className={`px-3 py-1.5 text-sm rounded ${
+                  selectedStores.includes(store.number)
+                    ? 'bg-jl-red text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+                title={STORES[store.number]}
+              >
+                {store.number}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Row 3: Qualification Filter and Sort */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          {/* Qualification Filter */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Qualification Filter
+            </label>
+            <select
+              value={qualificationFilter}
+              onChange={(e) => setQualificationFilter(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-jl-red"
+            >
+              {Object.entries(QUALIFICATION_FILTERS).map(([key, val]) => (
+                <option key={key} value={key}>{val.label}</option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              {QUALIFICATION_FILTERS[qualificationFilter].description}
+            </p>
+          </div>
+
+          {/* Sort By */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Sort By
+            </label>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-jl-red"
+            >
+              {Object.entries(SORT_OPTIONS).map(([key, val]) => (
+                <option key={key} value={key}>{val.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Employee Count Summary */}
+        {(selectedPeriod || (useCustomDates && customDates.start && customDates.end)) && (
+          <div className="mb-4 p-3 bg-gray-50 rounded-md">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-600">
+                {loadingEmployees ? (
+                  <span className="flex items-center gap-2">
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    Loading employees...
+                  </span>
+                ) : (
+                  <>
+                    <strong>{filteredEmployees.length}</strong> employees match filters
+                    {allEmployees.length !== filteredEmployees.length && (
+                      <span className="text-gray-400 ml-1">
+                        (of {allEmployees.length} total)
+                      </span>
+                    )}
+                  </>
+                )}
+              </span>
+              {filteredEmployees.length > 0 && !loadingEmployees && (
+                <span className="text-xs text-gray-400">
+                  {filteredEmployees.filter(e => e.invoice_percentage >= 15).length} qualified (15%+) •{' '}
+                  {filteredEmployees.filter(e => e.invoice_percentage >= 10 && e.invoice_percentage < 15).length} near (10-15%)
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Row 4: View Mode Tabs */}
         <div className="border-b mb-4">
           <div className="flex gap-4">
             <button
@@ -576,7 +692,7 @@ export default function ReportViewer({ session }) {
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Select Employee ({filteredEmployees.length} available)
+                Select Employee
               </label>
               <select
                 value={selectedEmployee?.user_id || ''}
@@ -586,15 +702,17 @@ export default function ReportViewer({ session }) {
                   setReportHtml(null)
                   setReportData(null)
                 }}
-                disabled={loadingEmployees}
+                disabled={loadingEmployees || filteredEmployees.length === 0}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-jl-red disabled:bg-gray-100"
               >
                 <option value="">
-                  {loadingEmployees ? 'Loading...' : 'Select employee'}
+                  {loadingEmployees ? 'Loading...' : 
+                   filteredEmployees.length === 0 ? 'Select a period first' : 
+                   'Select employee'}
                 </option>
                 {filteredEmployees.map((emp) => (
                   <option key={emp.user_id} value={emp.user_id}>
-                    {emp.first_name} {emp.last_name} - {STORES[emp.store_number] || emp.store_number}
+                    {emp.first_name} {emp.last_name} - {STORES[emp.store_number] || emp.store_number} ({emp.invoice_percentage?.toFixed(1)}%)
                   </option>
                 ))}
               </select>
@@ -603,7 +721,7 @@ export default function ReportViewer({ session }) {
             <div className="flex flex-wrap gap-3">
               <button
                 onClick={handleViewSingle}
-                disabled={loading || !selectedEmployee || (!selectedPeriod && !useCustomDates)}
+                disabled={loading || !selectedEmployee}
                 className="bg-jl-red hover:bg-jl-red-dark text-white font-medium py-2 px-6 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {loading ? (
@@ -621,7 +739,7 @@ export default function ReportViewer({ session }) {
 
               <button
                 onClick={handleSendToEmployee}
-                disabled={loading || !selectedEmployee || (!selectedPeriod && !useCustomDates)}
+                disabled={loading || !selectedEmployee}
                 className="bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-6 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 📧 Generate & Send
@@ -658,7 +776,11 @@ export default function ReportViewer({ session }) {
                 {loadingEmployees ? (
                   <p className="text-gray-500 text-sm p-2">Loading employees...</p>
                 ) : filteredEmployees.length === 0 ? (
-                  <p className="text-gray-500 text-sm p-2">No employees match the selected filters</p>
+                  <p className="text-gray-500 text-sm p-2">
+                    {selectedPeriod || (useCustomDates && customDates.start) 
+                      ? 'No employees match the selected filters'
+                      : 'Select a period first'}
+                  </p>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-1">
                     {filteredEmployees.map((emp) => (
@@ -676,7 +798,12 @@ export default function ReportViewer({ session }) {
                         />
                         <span className="text-sm">
                           {emp.first_name} {emp.last_name}
-                          <span className="text-gray-400 ml-1">({emp.store_number})</span>
+                          <span className="text-gray-400 ml-1">
+                            ({emp.store_number}) 
+                            <span className={emp.invoice_percentage >= 15 ? 'text-green-600 font-medium' : emp.invoice_percentage >= 10 ? 'text-yellow-600' : ''}>
+                              {' '}{emp.invoice_percentage?.toFixed(1)}%
+                            </span>
+                          </span>
                         </span>
                       </label>
                     ))}
@@ -688,7 +815,7 @@ export default function ReportViewer({ session }) {
             <div className="flex flex-wrap gap-3">
               <button
                 onClick={handleViewBatch}
-                disabled={batchLoading || (!selectedPeriod && !useCustomDates)}
+                disabled={batchLoading || filteredEmployees.length === 0}
                 className="bg-jl-red hover:bg-jl-red-dark text-white font-medium py-2 px-6 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {batchLoading ? (
@@ -723,6 +850,38 @@ export default function ReportViewer({ session }) {
         )}
       </div>
 
+      {/* Batch Stats Summary */}
+      {viewMode === 'batch' && batchStats && (
+        <div className="bg-white rounded-lg shadow p-4">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex flex-wrap gap-6">
+              <div className="text-center">
+                <div className="text-2xl font-bold text-gray-800">{batchStats.total}</div>
+                <div className="text-xs text-gray-500">Reports</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-green-600">{batchStats.qualified}</div>
+                <div className="text-xs text-gray-500">Qualified</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-yellow-600">{batchStats.nearThreshold}</div>
+                <div className="text-xs text-gray-500">Near Threshold</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-jl-red">${batchStats.totalBonus.toFixed(2)}</div>
+                <div className="text-xs text-gray-500">Total Bonus</div>
+              </div>
+            </div>
+            <button
+              onClick={exportToCsv}
+              className="bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium py-2 px-4 rounded-md transition-colors flex items-center gap-2"
+            >
+              📥 Export CSV
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Single Report Display */}
       {viewMode === 'single' && reportHtml && (
         <div className="bg-white rounded-lg shadow">
@@ -751,7 +910,7 @@ export default function ReportViewer({ session }) {
           <div className="p-4">
             <iframe
               srcDoc={reportHtml}
-              className="w-full border rounded-md report-frame"
+              className="w-full border rounded-md"
               style={{ height: '800px' }}
               title="Report Preview"
             />
@@ -805,7 +964,7 @@ export default function ReportViewer({ session }) {
           </div>
           
           {/* Quick Navigation */}
-          <div className="border-b px-6 py-2 bg-gray-50 flex flex-wrap gap-1">
+          <div className="border-b px-6 py-2 bg-gray-50 flex flex-wrap gap-1 max-h-24 overflow-y-auto">
             {batchReports.map((report, idx) => (
               <button
                 key={report.employee.user_id}
@@ -813,9 +972,11 @@ export default function ReportViewer({ session }) {
                 className={`px-2 py-1 text-xs rounded ${
                   idx === currentBatchIndex
                     ? 'bg-jl-red text-white'
-                    : 'bg-white border hover:bg-gray-100'
+                    : report.data.is_qualified 
+                      ? 'bg-green-100 border border-green-300 hover:bg-green-200'
+                      : 'bg-white border hover:bg-gray-100'
                 }`}
-                title={report.data.employee_name}
+                title={`${report.data.employee_name} - $${(report.data.total_bonus || 0).toFixed(2)}`}
               >
                 {report.employee.first_name} {report.employee.last_name?.charAt(0)}.
               </button>
@@ -825,7 +986,7 @@ export default function ReportViewer({ session }) {
           <div className="p-4">
             <iframe
               srcDoc={currentBatchReport?.html}
-              className="w-full border rounded-md report-frame"
+              className="w-full border rounded-md"
               style={{ height: '800px' }}
               title="Report Preview"
             />
@@ -837,7 +998,7 @@ export default function ReportViewer({ session }) {
       {!reportHtml && batchReports.length === 0 && !loading && !batchLoading && (
         <div className="bg-white rounded-lg shadow p-12 text-center text-gray-500">
           <div className="text-6xl mb-4">📋</div>
-          <p className="text-lg">Select filters and click "View" to generate report cards</p>
+          <p className="text-lg">Select a period and click "View" to generate report cards</p>
           <p className="text-sm mt-2">
             {viewMode === 'single' 
               ? 'Choose an employee to view their individual report'
