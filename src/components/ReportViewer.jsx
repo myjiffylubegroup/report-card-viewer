@@ -273,9 +273,9 @@ export default function ReportViewer({ session }) {
     
     // Manager reports use store_number and year/month instead of user_id and date range
     if (reportType === 'manager') {
-      const startDateObj = new Date(startDate)
-      const year = startDateObj.getFullYear()
-      const month = startDateObj.getMonth() + 1
+      // Parse date string directly to avoid timezone issues
+      // startDate is "YYYY-MM-DD" format
+      const [year, month] = startDate.split('-').map(Number)
       
       const response = await fetch(`${EDGE_FUNCTION_URL}/${config.endpoint}`, {
         method: 'POST',
