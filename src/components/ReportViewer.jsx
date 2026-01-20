@@ -271,44 +271,38 @@ export default function ReportViewer({ session }) {
     
     const { data: { session: currentSession } } = await supabase.auth.getSession()
     
-    // Manager reports use different endpoint format (store-based, GET request)
+    // Manager reports use store_number and year/month instead of user_id and date range
     if (reportType === 'manager') {
-      // Extract year and month from date range
       const startDateObj = new Date(startDate)
       const year = startDateObj.getFullYear()
       const month = startDateObj.getMonth() + 1
       
-      const url = `${EDGE_FUNCTION_URL}/${config.endpoint}?store_number=${employee.store_number}&year=${year}&month=${month}&return_html=true`
-      
-      const response = await fetch(url, {
-        method: 'GET',
+      const response = await fetch(`${EDGE_FUNCTION_URL}/${config.endpoint}`, {
+        method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
           'Authorization': `Bearer ${currentSession.access_token}`
-        }
+        },
+        body: JSON.stringify({
+          store_number: employee.store_number,
+          year: year,
+          month: month,
+          report_type: reportTypeValue,
+          send_email: sendEmail,
+          return_html: true
+        })
       })
       
       const data = await response.json()
       
-      if (!response.ok || data.error) {
+      if (!response.ok || !data.success) {
         throw new Error(data.error || 'Failed to generate report')
       }
       
-      // Map manager response format to match CSA/Greeter format
-      return {
-        success: true,
-        employee_name: `${employee.first_name} ${employee.last_name}`,
-        store_number: employee.store_number,
-        store_name: STORES[employee.store_number] || `Store ${employee.store_number}`,
-        period: { start_date: startDate, end_date: endDate },
-        report_type: reportTypeValue,
-        total_bonus: data.calculated_bonus || 0,
-        is_qualified: true, // Managers don't have qualification threshold
-        html: data.html || null,
-        raw_data: data
-      }
+      return data
     }
     
-    // CSA and Greeter reports use POST with user_id
+    // CSA and Greeter reports use user_id and date range
     const response = await fetch(`${EDGE_FUNCTION_URL}/${config.endpoint}`, {
       method: 'POST',
       headers: {
