@@ -153,6 +153,7 @@ export default function ReportViewer({ session }) {
     setReportHtml(null)
     setReportData(null)
     setBatchReports([])
+    setError(null)
     
     const startDate = useCustomDates ? customDates.start : selectedPeriod?.start
     const endDate = useCustomDates ? customDates.end : selectedPeriod?.end
@@ -166,24 +167,24 @@ export default function ReportViewer({ session }) {
       const config = REPORT_TYPES[reportType]
       
       if (reportType === 'manager') {
-        // Manager handling - different logic
+        // Manager handling - query by title containing 'manager'
         const { data, error } = await supabase
           .from('employees')
-          .select('user_id, first_name, last_name, store_number')
+          .select('user_id, first_name, last_name, home_store_id, title')
           .eq('active_flag', true)
+          .ilike('title', '%manager%')
           .order('last_name')
         
         if (error) throw error
         
-        const managers = data?.filter(e => {
-          const name = `${e.first_name} ${e.last_name}`.toUpperCase()
-          return name.includes('CANTRELL') || name.includes('SHUTT') || 
-                 name.includes('PORCHER') || name.includes('BYRD') || 
-                 name.includes('MAY') || name.includes('MEAD')
-        }) || []
-        
-        // Add placeholder percentage for managers
-        setAllEmployees(managers.map(m => ({ ...m, invoice_count: 0, store_total_invoices: 0, invoice_percentage: 100 })))
+        // Map home_store_id to store_number for consistency with other report types
+        setAllEmployees((data || []).map(m => ({ 
+          ...m, 
+          store_number: m.home_store_id,
+          invoice_count: 0, 
+          store_total_invoices: 0, 
+          invoice_percentage: 100 
+        })))
       } else {
         const { data, error } = await supabase
           .rpc('get_employees_by_role', { 
