@@ -167,20 +167,21 @@ export default function ReportViewer({ session }) {
       const config = REPORT_TYPES[reportType]
       
       if (reportType === 'manager') {
-        // Manager handling - query by title containing 'manager'
+        // Manager handling - managers are store-based, not employee-based
+        // Query connecteam_users for Service Center Managers
         const { data, error } = await supabase
-          .from('employees')
-          .select('user_id, first_name, last_name, home_store_id, title')
-          .eq('active_flag', true)
-          .ilike('title', '%manager%')
-          .order('last_name')
+          .from('connecteam_users')
+          .select('employee_id, first_name, last_name, store_number')
+          .eq('is_archived', false)
+          .eq('title', 'Service Center Manager')
+          .order('store_number')
         
         if (error) throw error
         
-        // Map home_store_id to store_number for consistency with other report types
+        // Map to expected format - user_id is employee_id, store_number already exists
         setAllEmployees((data || []).map(m => ({ 
           ...m, 
-          store_number: m.home_store_id,
+          user_id: m.employee_id,
           invoice_count: 0, 
           store_total_invoices: 0, 
           invoice_percentage: 100 
@@ -270,6 +271,44 @@ export default function ReportViewer({ session }) {
     
     const { data: { session: currentSession } } = await supabase.auth.getSession()
     
+    // Manager reports use different endpoint format (store-based, GET request)
+    if (reportType === 'manager') {
+      // Extract year and month from date range
+      const startDateObj = new Date(startDate)
+      const year = startDateObj.getFullYear()
+      const month = startDateObj.getMonth() + 1
+      
+      const url = `${EDGE_FUNCTION_URL}/${config.endpoint}?store_number=${employee.store_number}&year=${year}&month=${month}&return_html=true`
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${currentSession.access_token}`
+        }
+      })
+      
+      const data = await response.json()
+      
+      if (!response.ok || data.error) {
+        throw new Error(data.error || 'Failed to generate report')
+      }
+      
+      // Map manager response format to match CSA/Greeter format
+      return {
+        success: true,
+        employee_name: `${employee.first_name} ${employee.last_name}`,
+        store_number: employee.store_number,
+        store_name: STORES[employee.store_number] || `Store ${employee.store_number}`,
+        period: { start_date: startDate, end_date: endDate },
+        report_type: reportTypeValue,
+        total_bonus: data.calculated_bonus || 0,
+        is_qualified: true, // Managers don't have qualification threshold
+        html: data.html || null,
+        raw_data: data
+      }
+    }
+    
+    // CSA and Greeter reports use POST with user_id
     const response = await fetch(`${EDGE_FUNCTION_URL}/${config.endpoint}`, {
       method: 'POST',
       headers: {
