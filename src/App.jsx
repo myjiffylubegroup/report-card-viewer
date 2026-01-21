@@ -3,13 +3,21 @@ import { supabase } from './lib/supabase'
 import Login from './components/Login'
 import Dashboard from './components/Dashboard'
 import ReportViewer from './components/ReportViewer'
+import ResetPassword from './components/ResetPassword'
 
 export default function App() {
   const [session, setSession] = useState(null)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('generate')
+  const [showResetPassword, setShowResetPassword] = useState(false)
 
   useEffect(() => {
+    // Check if this is a password reset link
+    const hash = window.location.hash
+    if (hash && hash.includes('type=recovery')) {
+      setShowResetPassword(true)
+    }
+
     // Check current session
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
@@ -17,8 +25,13 @@ export default function App() {
     })
 
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setSession(session)
+      
+      // Handle password recovery event
+      if (event === 'PASSWORD_RECOVERY') {
+        setShowResetPassword(true)
+      }
     })
 
     return () => subscription.unsubscribe()
@@ -28,12 +41,23 @@ export default function App() {
     await supabase.auth.signOut()
   }
 
+  const handlePasswordResetComplete = () => {
+    setShowResetPassword(false)
+    // Clear the hash from URL
+    window.history.replaceState(null, '', window.location.pathname)
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
         <div className="text-xl text-gray-600">Loading...</div>
       </div>
     )
+  }
+
+  // Show reset password form if user clicked reset link
+  if (showResetPassword) {
+    return <ResetPassword onComplete={handlePasswordResetComplete} />
   }
 
   if (!session) {
