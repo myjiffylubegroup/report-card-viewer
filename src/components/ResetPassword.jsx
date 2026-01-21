@@ -1,25 +1,12 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { useNavigate } from 'react-router-dom'
 
-export default function ResetPassword() {
+export default function ResetPassword({ onComplete }) {
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [message, setMessage] = useState(null)
-  const navigate = useNavigate()
-
-  useEffect(() => {
-    // Check if we have a valid session from the reset link
-    const checkSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) {
-        setError('Invalid or expired reset link. Please request a new one.')
-      }
-    }
-    checkSession()
-  }, [])
 
   const handleResetPassword = async (e) => {
     e.preventDefault()
@@ -48,7 +35,9 @@ export default function ResetPassword() {
     } else {
       setMessage('Password updated successfully! Redirecting...')
       setTimeout(() => {
-        navigate('/')
+        if (onComplete) {
+          onComplete()
+        }
       }, 2000)
     }
     setLoading(false)
